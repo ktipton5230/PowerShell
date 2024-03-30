@@ -1,0 +1,121 @@
+$Credentials = Get-Credential -Credential "DOMAIN\user" 
+# Make sure to change this to your domain so it includes it in the UserName field
+#stores credentials for use over the script.
+
+# Prompt user for source, destination, and profile information
+# These are the assets in the domain, which are assigned names via the internal domain controller.
+$SourcePCName = Read-Host -Prompt "Enter the old PC hostname to capture a user profile for"
+$TargetPCName = Read-Host -Prompt "Enter the new PC hostname to restore the user profile to"
+$CapturedUser = Read-Host -Prompt "Enter the username for the profile you want to capture"
+
+Enable-WSManCredSSP -Role client -DelegateComputer *.your.domain.example -Force
+#This allows for enabling of credentials to be used on the remote computers.
+
+$allowed = @('WSMAN/*.your.domain.example')
+
+$key = 'hklm:\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation'
+if (!(Test-Path $key)) {
+    md $key
+}
+New-ItemProperty -Path $key -Name AllowFreshCredentials -Value 1 -PropertyType Dword -Force
+#implements a registry key which allows the use of remote credentials.            
+
+$key = Join-Path $key 'AllowFreshCredentials'
+if (!(Test-Path $key)) {
+    md $key
+}
+$i = 1
+$allowed |% {
+    # Script does not take into account existing entries in this key
+    New-ItemProperty -Path $key -Name $i -Value $_ -PropertyType String -Force
+    $i++
+}
+
+#Enable CredSSP
+Invoke-Command -ComputerName $SourcePCName -Credential $Credentials -ScriptBlock {Enable-WSManCredSSP -Role server -Force} 
+Invoke-Command -ComputerName $TargetPCName -Credential $Credentials -ScriptBlock {Enable-WSManCredSSP -Role server -Force} 
+Enable-WSManCredSSP -Role client -DelegateComputer $SourcePCName -Force
+Enable-WSManCredSSP -Role client -DelegateComputer $TargetPCName -Force 
+
+# Build and store remote PsExec and USMT command arguments in a string
+# to run on the OLD PC you are capturing FROM
+#
+# Make sure to replace the "\\domain" paths to your network share
+# with USMT files (loadstate and scanstate and XML USMT config files)
+#
+$CaptureArgs = "\\domain\files\Groups\ServiceDesk\USMT\amd64\Store\$CapturedUser" 
+$CaptureArgs2 = '/ue:*\*' 
+$CaptureArg3 = "/ui:DOMAIN\$CapturedUser" 
+$CaptureArg4 = "/i:\\domain\files\Groups\ServiceDesk\USMT\amd64\miguser_including_downloads.xml" 
+$CaptureArg5 = "/i:\\domain\files\Groups\ServiceDesk\USMT\amd64\chromebookmarks.xml" 
+$CaptureArg6 = "/i:\\domain\files\Groups\ServiceDesk\USMT\amd64\migdocs.xml" 
+$CaptureArg7 = "/l:C:\scanlog.log" 
+$CaptureArg8 = "/o" 
+$CaptureArg9 = "/c" 
+$CaptureArg10 = "/v:13"
+$CaptureArg11 = "/localonly"
+#these arguements are explained on the USMT transfer tool page, I am not
+#sure what they do off the top of my head
+#some of the commands here scan for bookmarks on the user computer
+#and allow for the scanlog from USMT to be stored on their computer
+
+
+$ScriptBlock = {
+    $exePath = "\\domain\files\Groups\ServiceDesk\USMT\amd64\scanstate.exe" 
+    & $exePath $Using:CaptureArgs $Using:CaptureArgs2 $Using:CaptureArg3 $Using:CaptureArg4 $Using:CaptureArg5 $Using:CaptureArg6 $Using:CaptureArg7 $Using:CaptureArg8 $Using:CaptureArg9 $Using:CaptureArg10 $Using:CaptureArg11
+}
+
+#Invoke-Command -ComputerName "$SourcePCName" -ScriptBlock $ScriptBlock -ArgumentList {$CaptureArgs,$CaptureArgs2,$CaptureArg3,$CaptureArg4,$CaptureArg5,$CaptureArg6,$CaptureArg7,$CaptureArg8,$CaptureArg9,$CaptureArg10,$CaptureArg11} -Authentication Credssp -Credential $Credentials
+
+$Verify = "/verify:all"
+$Verify2 = "\\domain\files\Groups\ServiceDesk\USMT\amd64\Store\$CapturedUser\USMT\USMT.MIG"
+$Verify3 = "/v:13"
+$Verify4 = "/l:C:\usmtutils.log"
+
+$ScriptBlock3 = {
+    $exepath = "\\domaincifs\files\Groups\ServiceDesk\USMT\amd64\usmtutils.exe"
+    & $exepath $Using:Verify $Using:Verify2 $Using:Verify3 $Using:Verify4
+}
+
+#Invoke-Command -ComputerName "$SourcePCName" -ScriptBlock $ScriptBlock3 -ArgumentList {$Verify,$Verify2,$Verify3,$Verify4} -Authentication Credssp -Credential $Credentials
+
+Read-Host -Prompt "`nPlease verify there is no corruption of files before entering Loadstate. (Press Enter to continue.)"
+#This is to make sure the entire profile that was scanned is not corrupt before the transfer over to the new PC.
+
+# Build and store remote PsExec and USMT command arguments in a string
+# to run on the NEW PC you are restoring the profile TO
+#
+# Make sure to replace the "\\domain" paths to your network share
+# with USMT files (loadstate and scanstate and XML USMT config files)
+#
+$RestoreArgs = "\\domain\files\Groups\ServiceDesk\USMT\amd64\Store\$CapturedUser" 
+$RestoreArgs2 = "/i:\\domain\files\Groups\ServiceDesk\USMT\amd64\miguser_including_downloads.xml" 
+$RestoreArgs3 = "/i:\\domain\files\Groups\ServiceDesk\USMT\amd64\chromebookmarks.xml" 
+$RestoreArgs4 = "/i:\\domain\files\Groups\ServiceDesk\USMT\amd64\migdocs.xml"
+$RestoreArgs5 = "/l:C:\loadlog.log" 
+$RestoreArgs6 = "/c" 
+$RestoreArgs7 = "/v:13"
+
+$ScriptBlock2 = {
+    $exepath =  "\\domain\files\Groups\ServiceDesk\USMT\amd64\loadstate.exe"
+    & $exePath $Using:RestoreArgs $Using:RestoreArgs2 $Using:RestoreArgs3 $Using:RestoreArgs4 $Using:RestoreArgs5 $Using:RestoreArgs6 $Using:RestoreArgs7
+}
+
+#Invoke-Command -ComputerName "$TargetPCName" -ScriptBlock $ScriptBlock2 -ArgumentList {$RestoreArgs,$RestoreArgs2,$RestoreArgs3,$RestoreArgs4,$RestoreArgs5,$RestoreArgs6,$RestoreArgs7} -Authentication Credssp -Credential $Credentials
+
+# Check if the key exists before deleting, cleans up registry edits made by the script.
+if (Test-Path $key) {
+    Remove-Item -Path $key -Recurse -Force
+    Write-Host "Registry key deleted: $key"
+} else {
+    Write-Host "Registry key does not exist: $key"
+}
+
+#Disable CredSSP on remote computers, cleans up edits made on PCs.
+Invoke-Command -ComputerName $SourcePCName -Credential $Credentials -ScriptBlock {Disable-WSManCredSSP -Role server }
+Invoke-Command -ComputerName $TargetPCName -Credential $Credentials -ScriptBlock {Disable-WSManCredSSP -Role server }  
+Disable-WSManCredSSP -Role client
+
+# Inform user of completion
+Read-Host -Prompt "`nUSMT Process has completed! Check USMT logs for details. (Press Enter to exit) "
+
